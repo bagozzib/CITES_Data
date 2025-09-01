@@ -10,7 +10,7 @@
 
 
 ## Description:
-The code in this repository extracts, classifies, and formats attendee records from the Convention on International Trade in Endangered Species of Wild Fauna and Flora (CITES) Conference of the Parties (CoP) and pre-CoP rosters (CoP1–CoP19). Source documents are mixed text/scan PDFs with multi-column layouts and multilingual headings; the pipeline performs layout-aware parsing/OCR, detects delegation headers, identifies person starts, and normalizes names. The primary attendee output consists of Delegation, Honorific, Person Name, and Affiliation.
+The code in this repository extracts, classifies, and formats attendee records from the Convention on International Trade in Endangered Species of Wild Fauna and Flora (CITES) Conference of the Parties (CoP) rosters (CoP1–CoP19). Source documents are mixed text/scan PDFs with multi-column layouts and multilingual headings; the pipeline performs layout-aware parsing/OCR, detects delegation headers, identifies person starts, and normalizes names. The primary attendee output consists of Delegation, Honorific, Person Name, and Affiliation.
 In addition, the repo includes routines to standardize person names (e.g., LAST, First → First Last), harmonize delegation names, flag multilingual delegation strings, add ISO/COW country codes, derive CoP year and host city, geolocate affiliations and CoP cities (lat/long), compute attendee–CoP distances, flag likely country-centroid geocodes, and construct a female indicator by combining honorifics with a first-name–based gender guess.
 
 ## Installation:
@@ -30,7 +30,7 @@ To set up the project environment, follow these steps:
    For detailed usage instructions, please refer to the project [UNFCCC Project Code Execution Steps](https://github.com/bagozzib/UNFCCC-Attendance-Data/wiki/UNFCCC-Project-Code--Execution-Steps) WIKI.
 
  ## Folder Structure:
-   - **master_data**: This directory holds the final datasets as definitive CSV files, both with and without translated data.
+   - **master_data**: This directory holds the final dataset as a definitive CSV file.
         - Files:
            -  cites.cops.csv
         
@@ -66,7 +66,7 @@ To set up the project environment, follow these steps:
    - **requirements.txt**: This file enumerates the Python dependencies necessary for the project.
      
 ## Conclusion
-  - We built a reproducible pipeline that reliably extracts and standardizes CITES (pre-)COP attendee records from heterogeneous PDFs—combining layout-aware parsing/OCR, targeted heuristics (underlines/all-caps, honorific & dotted-initial name rules, multilingual slashes, email anchors), NLP checks, and light manual review—to produce consistent Delegation, Honorific, Person Name, and Affiliation fields ready for analysis.
+  - We built a reproducible pipeline that reliably extracts and standardizes CITES COP attendee records from heterogeneous PDFs—combining layout-aware parsing/OCR, targeted heuristics (underlines/all-caps, honorific & dotted-initial name rules, multilingual slashes, email anchors), NLP checks, and light manual review—to produce consistent Delegation, Honorific, Person Name, and Affiliation fields ready for analysis.
 ## Contributors:
    - Benjamin E. Bagozzi (Corresponding author: bagozzib@udel.edu)
    - Daria Blinova
