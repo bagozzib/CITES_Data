@@ -1,721 +1,448 @@
-import pdfplumber
-import re
-from inputs_file import title_match_pattern
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
+# -*- coding: utf-8 -*-
 import os
+import re
+import argparse
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Iterable, Optional
 
-# Set the path to the Tesseract OCR executable file
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-pdf_path = r"C:\Users\emuru\OneDrive\Desktop\CITES COP Participants\CITES_COP1_Parties_and_Observers.pdf"
-# if the data is present in single column format or two-columns format or three columns format.
+import pdfplumber
+import pandas as pd
 
-class ExtractOneColumnPdfData:
-    """Class for extracting and processing text from single-column PDF documents."""
+import pytesseract
+from pytesseract import Output as TesseractOutput
+from pdf2image import convert_from_path
+from PIL import Image
 
-    def __init__(self, pdf_path):
-        """Initialize the ExtractOneColumnPdfData object with the PDF file path."""
 
-        self.pdf_path = pdf_path
+title_match_pattern = re.compile(
+    r"(Mr\.\s*|H\.R\.H\.\s*|Mx\.\s*|St\.|Miss\ |Mlle\ |Mine\ |H\.H\.\s*|Ind\.\s*|His\ |Ind\ |Ms\ |Mr\ |Sra\ |Sr\ |M\ |On\ |M\ |Fr\ |H\.O\.\s*|Rev\ |Mme\ |Sr\ |Msgr\ |On\.\s*|Fr\.\s*|Rev\.\s*|H\.E(?:\.\s*(?:Ms\.\s*|Mr\.\s*|Ms\ |Mr\ |Sra\ |Sr\ |Sra\.\s*|Mme|Sr\.\s*|Msgr\.\s*))?|Msgr\.\s*|Mrs\.\s*|Sra\.\s*|Sr\.\s*|Ms\.\s*|Dr\.\s*|Prof\.\s*|M\.\s*|Mme|Ms|S\.E(?:\.\s*(?:Ms\.\s*|Mr\.\s*|Mme|Mr|Ms|Dr|Msgr\.\s*|M\.\s*|Ms\ |Mr\ |Sra\ |Sr\ |M\ |Sra\.\s*|Sr\.\s*))?)"
+)
 
-    def run(self):
-        """ Run the extraction and processing pipeline. """
 
-        new_processed_words_list = []  # Initialize list to store processed text lines
+@dataclass
+class Record:
+    """Structured output row for a participant."""
+    Delegation: str
+    Honorific: str
+    Person_Name: str
+    Affiliation: str
 
-        processed_extracted_lines = self.extract_text_and_process(self.pdf_path)  # Extract and process text
 
-        # Iterate over each person's data
-        for each_person_data in processed_extracted_lines:
-            new_list = []  # Initialize list to store processed data for each person
-            # Check if the first line does not match the title pattern
-            if not title_match_pattern.match(each_person_data[0]):
-                new_processed_words_list.append(each_person_data)  # Append to the processed list if it doesn't match
+def split_honorific_and_person(line: str) -> Tuple[str, str]:
+    """Split a line into (honorific, person) using the provided pattern."""
+    s = (line or "").strip()
+    m = title_match_pattern.match(s)
+    if m:
+        honorific = m.group().strip()
+        person = s[len(m.group()):].strip()
+        return honorific, person
+    return "", s
+
+
+def is_all_caps_header(text: str) -> bool:
+    """
+    Heuristic for delegation headers in CITES PDFs:
+    allow only uppercase letters, spaces, and slashes.
+    e.g., "BAHAMAS", "SWITZERLAND / SUISSE / SUIZA"
+    """
+    if not text:
+        return False
+    s = text.strip()
+    return bool(s and all(c.isupper() or c in " /" for c in s))
+
+
+def group_chars_to_lines(chars: List[Dict], y_tol: float = 3.0) -> List[Tuple[str, float, float, bool]]:
+    """
+    Cluster characters into lines, reconstruct text, and flag bold.
+    Returns list of (text, y0, y1, is_bold).
+    """
+    if not chars:
+        return []
+    chars = sorted(chars, key=lambda c: (c.get('top', 0.0), c.get('x0', 0.0)))
+    lines: List[Tuple[List[Dict], float, float]] = []
+    cur = [chars[0]]
+    y0 = y1 = chars[0].get('top', 0.0)
+    for c in chars[1:]:
+        top = c.get('top', 0.0)
+        if abs(top - y1) <= y_tol:
+            cur.append(c)
+            y1 = top
+        else:
+            lines.append((cur, y0, y1))
+            cur, y0, y1 = [c], top, top
+    lines.append((cur, y0, y1))
+
+    out: List[Tuple[str, float, float, bool]] = []
+    for line_chars, y0, y1 in lines:
+        line_chars.sort(key=lambda c: c.get('x0', 0.0))
+        text = ''.join(c.get('text', '') for c in line_chars).strip()
+        is_bold = any('Bold' in (c.get('fontname') or '') for c in line_chars)
+        out.append((text, y0, y1, is_bold))
+    return out
+
+
+def group_words_to_lines_with_y(words: List[Dict], y_tol: float = 3.0) -> List[Tuple[str, float, float]]:
+    """
+    Given a list of word dicts (with 'text' and 'top'), cluster into lines by y.
+    Returns a list of (text, y0, y1) tuples.
+    """
+    if not words:
+        return []
+
+    words_sorted = sorted(words, key=lambda w: (w.get("top", 0.0), w.get("x0", 0.0)))
+    lines = []
+    cur = [words_sorted[0]]
+    y0 = y1 = words_sorted[0].get("top", 0.0)
+    for w in words_sorted[1:]:
+        top = w.get("top", 0.0)
+        if abs(top - y1) <= y_tol:
+            cur.append(w)
+            y1 = top
+        else:
+            cur.sort(key=lambda ww: ww.get("x0", 0.0))
+            txt = " ".join(ww.get("text", "") for ww in cur)
+            lines.append((txt, y0, y1))
+            cur = [w]
+            y0 = y1 = top
+
+    cur.sort(key=lambda ww: ww.get("x0", 0.0))
+    txt = " ".join(ww.get("text", "") for ww in cur)
+    lines.append((txt, y0, y1))
+
+    return lines
+
+
+def collect_paragraphs_with_y(lines_with_y: List[Tuple[str, float, float]], para_factor: float = 1.5) -> List[Tuple[List[str], float, float]]:
+    """
+    Given [(text,y0,y1),...], compute the median vertical gap between midpoints,
+    then split whenever the gap > median*para_factor.
+    Returns list of ([line1, line2, ...], block_y0, block_y1).
+    """
+    if not lines_with_y:
+        return []
+    mids = [(y0 + y1) / 2.0 for _, y0, y1 in lines_with_y]
+    diffs = [mids[i + 1] - mids[i] for i in range(len(mids) - 1)]
+    if not diffs:
+        return [( [lines_with_y[0][0]], lines_with_y[0][1], lines_with_y[0][2] )]
+    median_gap = sorted(diffs)[len(diffs) // 2]
+    thresh = median_gap * para_factor
+
+    paras: List[Tuple[List[str], float, float]] = []
+    cur_lines: List[str] = []
+    block_y0: Optional[float] = None
+    block_y1: Optional[float] = None
+    prev_mid: Optional[float] = None
+
+    for (txt, y0, y1), mid in zip(lines_with_y, mids):
+        if prev_mid is not None and (mid - prev_mid) > thresh and cur_lines:
+            paras.append((cur_lines, block_y0 if block_y0 is not None else y0, block_y1 if block_y1 is not None else y1))
+            cur_lines = []
+            block_y0 = block_y1 = None
+
+        if not cur_lines:
+            block_y0 = y0
+        cur_lines.append(txt)
+        block_y1 = y1
+        prev_mid = mid
+
+    if cur_lines:
+        paras.append((cur_lines, block_y0 if block_y0 is not None else 0.0, block_y1 if block_y1 is not None else 0.0))
+
+    return paras
+
+
+def extract_singlecol_textpdf(pdf_path: str) -> List[Record]:
+    """
+    Single-column text PDFs (font-based). Delegations are bold lines, persons beneath.
+    Affiliation lines continue until the next bold line or an empty line.
+    """
+    records: List[Record] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            lines = group_chars_to_lines(page.chars, y_tol=3.0)
+            i = 0
+            current_delegation: Optional[str] = None
+
+            while i < len(lines):
+                text, _, _, is_bold = lines[i]
+
+                # Bold lines → delegation headers
+                if is_bold and text:
+                    current_delegation = text.split("/", 1)[0].strip()
+                    i += 1
+                    continue
+
+                # Non-bold + have a current delegation → person row
+                if current_delegation and text:
+                    honorific, person = split_honorific_and_person(text)
+                    i += 1
+
+                    # Collect affiliation lines (subsequent non-bold, non-empty)
+                    affiliation_lines: List[str] = []
+                    while i < len(lines) and not lines[i][3] and lines[i][0].strip():
+                        affiliation_lines.append(lines[i][0].strip())
+                        i += 1
+
+                    affiliation = " ".join(affiliation_lines).strip()
+                    records.append(Record(
+                        Delegation=current_delegation,
+                        Honorific=honorific,
+                        Person_Name=person,
+                        Affiliation=affiliation
+                    ))
+                else:
+                    i += 1
+
+    return records
+
+
+def _twocol_records_from_words(words: List[Dict], x0_thresh: float) -> List[Record]:
+    """
+    Core two-column extraction on a single page's word list.
+    - Detect global delegation headers (all-caps single-line paragraphs).
+    - Split into left/right columns by x0_thresh.
+    - For each column paragraph: first line is name, rest is affiliation.
+    """
+    records: List[Record] = []
+
+    # --------- Detect global headers on the whole page ----------
+    full_lines = group_words_to_lines_with_y(words, y_tol=3.0)
+    full_paras = collect_paragraphs_with_y(full_lines, para_factor=1.5)
+
+    # Build sorted list of (midpoint_y, delegation_name)
+    headers: List[Tuple[float, str]] = []
+    for blk, y0, y1 in full_paras:
+        if len(blk) == 1 and is_all_caps_header(blk[0]):
+            nm = blk[0].split("/", 1)[0].strip()
+            mid = (y0 + y1) / 2.0
+            headers.append((mid, nm))
+    headers.sort(key=lambda x: x[0])
+
+    def header_for_mid(mid: float) -> Optional[str]:
+        ans = None
+        for m, name in headers:
+            if m <= mid:
+                ans = name
+            else:
+                break
+        return ans
+
+    # --------- Split into left/right columns ----------
+    left_words = sorted([w for w in words if w.get("x0", 0.0) < x0_thresh], key=lambda w: (w.get("top", 0.0), w.get("x0", 0.0)))
+    right_words = sorted([w for w in words if w.get("x0", 0.0) >= x0_thresh], key=lambda w: (w.get("top", 0.0), w.get("x0", 0.0)))
+
+    for col_words in (left_words, right_words):
+        lined = group_words_to_lines_with_y(col_words, y_tol=3.0)
+        paras = collect_paragraphs_with_y(lined, para_factor=1.5)
+
+        for blk, y0, y1 in paras:
+            # Skip pure headers inside the column
+            if len(blk) == 1 and is_all_caps_header(blk[0]):
                 continue
 
-            # Iterate over each string item in the person's data
-            for each_str_item in each_person_data:
-                if title_match_pattern.match(each_str_item):
-                    new_list.append([each_str_item])  # Start a new sublist for titles
-                else:
-                    new_list[-1].append(each_str_item)  # Append to the last sublist
+            if not blk:
+                continue
 
-            new_processed_words_list.extend(new_list)  # Extend the processed list with the new sublist
+            name_line = blk[0].strip()
+            honorific, person = split_honorific_and_person(name_line)
+            affiliation = " ".join(ln.strip() for ln in blk[1:]).strip()
 
-        pattern = re.compile(r"^\d+$")  # Define pattern to match numeric strings
+            mid = (y0 + y1) / 2.0
+            delegation = header_for_mid(mid) or ""
 
-        # Display the processed internal list
-        for sublist in new_processed_words_list:
-            if not pattern.match(sublist[0]) and sublist[0] and '(continued)' not in sublist[0]:
-                print(sublist)
+            records.append(Record(
+                Delegation=delegation,
+                Honorific=honorific,
+                Person_Name=person,
+                Affiliation=affiliation
+            ))
 
-    def extract_text_and_process(self, pdf_path, space_threshold=1.5):
-        """Extract text from a PDF, group lines based on vertical spacing, remove specific characters,
-            and process uppercase text by prepending 'Entity:'. """
+    return records
 
-        nested_lines = []  # Initialize list to store extracted lines
-        current_group = []  # Initialize list to store current line group
-        last_y = None  # Initialize variable to store last y-coordinate
-        last_char_height = None  # Initialize variable to store last character height
 
-        # Open the PDF file
+def extract_twocol_textpdf(pdf_path: str, x0_thresh: float = 260.0) -> List[Record]:
+    """Two-column text PDFs using pdfplumber word geometry."""
+    out: List[Record] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words() or []
+            if not words:
+                continue
+            out.extend(_twocol_records_from_words(words, x0_thresh=x0_thresh))
+    return out
+
+
+def ocr_page_to_words(img: Image.Image) -> List[Dict]:
+    """
+    Run Tesseract OCR with TSV output and convert to a pdfplumber-like words list:
+    [{'text': str, 'x0': float, 'top': float}, ...]
+    """
+    data = pytesseract.image_to_data(img, output_type=TesseractOutput.DICT)
+    words: List[Dict] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        txt = (data["text"][i] or "").strip()
+        conf = int(data.get("conf", ["-1"] * n)[i])
+        if not txt or conf < 0:
+            continue
+        left = float(data.get("left", [0] * n)[i])
+        top = float(data.get("top", [0] * n)[i])
+        # width = float(data.get("width", [0]*n)[i])  # not strictly needed here
+        # height = float(data.get("height",[0]*n)[i])
+        words.append({"text": txt, "x0": left, "top": top})
+    return words
+
+
+def extract_with_ocr(pdf_path: str, x0_thresh: float = 260.0, dpi: int = 300, poppler_path: Optional[str] = None) -> List[Record]:
+    """
+    OCR path for image PDFs:
+    - Convert pages → images
+    - Tesseract TSV → per-word coordinates
+    - Reuse the two-column paragraph logic on OCR words
+    """
+    images = convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
+    out: List[Record] = []
+    for img in images:
+        words = ocr_page_to_words(img)
+        if not words:
+            continue
+        out.extend(_twocol_records_from_words(words, x0_thresh=x0_thresh))
+    return out
+
+
+def detect_layout_quick(pdf_path: str, x0_thresh: float = 260.0) -> str:
+    try:
         with pdfplumber.open(pdf_path) as pdf:
-            # Iterate through each page of the PDF
-            for page in pdf.pages:
-                chars = page.chars  # Get characters on the page
-
-                # Iterate through each character on the page
-                for ch in chars:
-                    # Start a new line group if the vertical space exceeds the threshold
-                    if last_y is not None and (ch["top"] > last_y + space_threshold * last_char_height):
-                        if current_group:
-                            nested_lines.append(current_group)
-                            current_group = []  # Reset current line group
-
-                    # Append the current character to the last line in the group, or start a new line
-                    if not current_group or (last_y is not None and ch["top"] > last_y):
-                        current_group.append(ch["text"])
-                    else:
-                        current_group[-1] += ch["text"]
-
-                    # Update the last known position and height of a character
-                    last_y = ch["top"]
-                    last_char_height = ch["height"]
-
-                # Add the last group if it's not empty
-                if current_group:
-                    nested_lines.append(current_group)
-                    current_group = []  # Reset current line group
-
-        # Clean, filter, and process the text
-        processed_nested_lines = []
-        for group in nested_lines:
-            # Remove '*' and '%' from each line
-            cleaned_group = [re.sub(r'[*%]', '', line).strip() for line in group]
-
-            # Skip the group if it contains only one item and that item is all numeric
-            if len(cleaned_group) == 1 and cleaned_group[0].isdigit():
-                continue
-
-            # Check if all items in the group are uppercase
-            if all(line.isupper() for line in cleaned_group):
-                entity_line = 'entity: ' + ' '.join(cleaned_group)
-                processed_nested_lines.append([entity_line])
-            else:
-                # Filter out short, non-meaningful strings
-                meaningful_lines = [line for line in cleaned_group if len(line) >= 1]
-                if meaningful_lines:
-                    processed_nested_lines.append(meaningful_lines)
-
-        return processed_nested_lines
-
-class ExtractTwoColumnsPDF():
-    def __init__(self, pdf_path, x0_threshold):
-        """ Initialize the ExtractMultipleColumnsPDF object with the PDF file path and x0 threshold. """
-
-        self.pdf_path = pdf_path
-        self.x0_threshold = x0_threshold
-
-    def run(self):
-        """Execute the extraction process for multiple columns PDF. """
-
-        all_pages_data = self.extract_page_wise_column_data()
-        persons_data = self.extract_each_person_details(all_pages_data)
-        persons_data = self.separate_entity_lines(persons_data)
-        persons_data = [dt for dt in persons_data if dt]
-
-        persons_data = self.filter_strings(persons_data)
-
-        for each_person_data in persons_data:
-            print(each_person_data)
-
-        return
-
-    def extract_page_wise_column_data(self):
-        """ Extract data from each page of the PDF file and organize it into columns. """
-
-        with pdfplumber.open(self.pdf_path) as pdf:
-            all_pages_data = []
-
-            for page in pdf.pages:
-                page_data = []
-
-                words = page.extract_words()
-                # Extract x0 values for 'Mr.' in each column
-                x0_first_column_mr = [word['x0'] for word in words if word['text'] == 'Mr.' and word['x0'] <= self.x0_threshold]
-                x0_second_column_mr = [word['x0'] for word in words if word['text'] == 'Mr.' and word['x0'] > self.x0_threshold]
-
-                # Process the first column
-                first_column_words = [word for word in words if word['x0'] <= self.x0_threshold]
-                self.process_column_words(first_column_words, page_data, x0_first_column_mr, x0_second_column_mr)
-
-                # Process the second column
-                second_column_words = [word for word in words if word['x0'] > self.x0_threshold]
-                self.process_column_words(second_column_words, page_data, x0_first_column_mr, x0_second_column_mr)
-
-                all_pages_data.append(page_data)
-
-            return all_pages_data
-
-
-    def process_column_words(self, column_words, column_data, x0_first_column_mr, x0_second_column_mr):
-        """ Processes sorted words of a column and appends them line-wise to the column data. """
-
-        current_line_top = None
-        line_text = ''
-        for word in column_words:
-            if current_line_top is None or abs(word['top'] - current_line_top) > 5:
-                if line_text:
-                    column_data.append(line_text.strip())
-                line_text = word['text']
-                current_line_top = word['top']
-            else:
-                line_text += ' ' + word['text']
-        if line_text:
-            column_data.append(line_text.strip())
-
-        # Add 'entity:' prefix to text in the same column with lowercase and x0 less than 'Mr.'
-        if x0_first_column_mr and x0_first_column_mr[0] > self.x0_threshold:
-            for i, line in enumerate(column_data):
-                if line.isupper() and all(word['x0'] < x0_first_column_mr[0]+200 for word in column_words):
-                    column_data[i] = 'entity:' + line
-
-        if x0_second_column_mr and x0_second_column_mr[0] > self.x0_threshold:
-            for i, line in enumerate(column_data):
-                if line.isupper() and all(word['x0'] < x0_second_column_mr[0]+200 for word in column_words):
-                    column_data[i] = 'entity:' + line
-
-
-    def extract_each_person_details(self, all_pages_data):
-        """ Extract individual details of each person from the provided data. """
-
-        # Extracting individual persons' details using the title pattern
-        persons_data = []
-        current_person = []
-
-        # Initialize x0 values for 'Mr.' in each column for each page
-        for page_data in all_pages_data:
-            x0_first_column_mr = None
-            x0_second_column_mr = None
-            for line in page_data:
-                try:
-                    if 'Mr.' in line:
-                        if x0_first_column_mr is None:
-                            x0_first_column_mr = [word['x0'] for word in page_data if word['text'] == 'Mr.' and word['x0'] <= 275]
-                        elif x0_second_column_mr is None:
-                            x0_second_column_mr = [word['x0'] for word in page_data if word['text'] == 'Mr.' and word['x0'] > 275]
-                except:
-                    pass
-
-            for line in page_data:
-                if title_match_pattern.match(line):
-                    # Start a new person's details
-                    if current_person:
-                        persons_data.append(current_person)
-                    current_person = [line]
-                else:
-                    # Add 'entity:' prefix to text in the same column with lowercase and x0 less than 'Mr.'
-                    if x0_first_column_mr and 'entity:' not in line and all(word['x0'] < min(x0_first_column_mr) for word in page_data):
-                        current_person.append('entity:' + line)
-                    elif x0_second_column_mr and 'entity:' not in line and all(word['x0'] < min(x0_second_column_mr) for word in page_data):
-                        current_person.append('entity:' + line)
-                    else:
-                        current_person.append(line)
-
-        return persons_data
-
-
-    def separate_entity_lines(self, persons_data):
-        """ Separate the lines of text into entities and other information. """
-
-        new_persons_data = []  # Initialize list to store separated lines of text
-        for person in persons_data:
-            per_data = []  # Initialize list to store non-entity lines
-            entity_lines = []  # List to store consecutive entity lines
-            for line in person:
-                if line.startswith('entity:'):
-                    entity_lines.append(line[7:])  # Add line to entity_lines, removing the 'entity:' prefix
-                else:
-                    if entity_lines:
-                        # Join all entity lines and add as a single entry, then reset entity_lines
-                        new_persons_data.append('entity:' + ' '.join(entity_lines))
-                        entity_lines = []
-                    per_data.append(line)
-
-            # Add non-entity lines
-            if per_data:
-                new_persons_data.append(per_data)
-
-            # Handle any remaining entity lines after the loop
-            if entity_lines:
-                new_persons_data.append(['entity:' + ' '.join(entity_lines)])
-
-        return new_persons_data
-
-
-    def clean_list(self, main_data_list):
-        """  Remove list items that are either all numbers or contain numbers but no alphabets. """
-
-        cleaned_list = []
-        for data_list in main_data_list:
-            items = []
-            for item in data_list:
-                # Check if the item is not all digits and contains at least one alphabet character
-                if not item.replace(' ', '').isdigit() and any(char.isalpha() for char in item):
-                    items.append(item)
-
-            cleaned_list.append(items)
-        return cleaned_list
-
-    def filter_strings(self, persons_data):
-        """ Filter out strings from nested lists based on specified criteria, while retaining the nested list structure. """
-
-        filtered_data = []
-        for item in persons_data:
-            if isinstance(item, list):  # Check if the item is a list
-                filtered_sublist = [s for s in item if not self.is_excluded(s)]
-                if filtered_sublist:  # Add the sublist only if it's not empty
-                    filtered_data.append(filtered_sublist)
-            elif isinstance(item, str):  # Check if the item is a string
-                if not self.is_excluded(item):
-                    filtered_data.append(item)
-
-        return filtered_data
-
-    def is_excluded(self, string):
-        """ Determine if the string should be excluded based on the specified criteria. """
-
-        lower_string = string.lower()
-        return (any(c.isdigit() for c in lower_string) or
-                'email' in lower_string or 'T:' in lower_string or
-                'P.O.' in lower_string or 'F:' in lower_string)
-
-class ExtractThreeColumnsPdfData:
-    """Extract text from 2 and 3 columns PDF data and print as a list of lists."""
-
-    def __init__(self, pdf_path, observed_pdf_line_width):
-        """Initialize the ExtractTwoAndThreeColumnsPdfData object with the PDF file path."""
-        self.pdf_path = pdf_path
-        self.observed_pdf_line_width = observed_pdf_line_width
-
-    def run(self):
-        """Extract the data from the given PDF and print it."""
-
-        grouped_output = self.extract_with_bold_annotations()  # Extract data with bold annotations
-
-        # Remove lines that start with certain text
-        pattern = re.compile(r'^.*\bFCCC/CP/2005/INF.2\b.*$')
-
-        # Iterate over the grouped output list
-        for index, line in enumerate(grouped_output):
-            # Assuming the regex should match the first item in the sublist
-            if pattern.match(line[0]):
-                # Check if there's a line before it to avoid IndexError
-                if index > 0:
-                    # Remove the current and previous lines
-                    del grouped_output[index]
-                    del grouped_output[index - 1]
-                else:
-                    # If it's the first line, just remove the current line
-                    del grouped_output[index]
-
-        # Iterate over the remaining lines in grouped_output
-        for d in grouped_output:
-            # Check if the first item exists and does not contain '(continued)'
-            if d[0] and '(continued)' not in d[0]:
-                print(d)  # Print the line
-
-        return
-
-    def should_add_bold_prefix(self, text):
-        """Check if a bold prefix should be added to the given text."""
-
-        # Define the pattern to match numerical values
-        pattern = r'^[-+]?\d*\.?\d+$'
-
-        # Check if the text starts with "FCCC/CP" or matches the numerical pattern
-        if text.startswith("FCCC/CP") or re.match(pattern, text):
-            return False  # No bold prefix needed
-
-        return True  # Add bold prefix
-
-    def merge_entity_lines(self, groups):
-        """Merge lines within groups where the first line starts with 'Entity:'."""
-
-        merged_groups = []  # Initialize list to store merged groups
-        i = 0  # Initialize index for iterating through groups
-
-        # Iterate through each group
-        while i < len(groups):
-            group = groups[i]  # Get current group
-
-            # Check if first line starts with 'Entity:' and group has more than one line
-            if group[0].startswith("Entity:") and len(group) > 1:
-                merged_group = [" ".join(group)]  # Merge lines within the group
-                merged_group = [merged_group[0].replace(' Entity:', ' ')]  # Replace ' Entity:' with space
-                merged_groups.append(merged_group)  # Append merged group to the list
-            else:
-                merged_groups.append(group)  # If conditions are not met, append the original group
-            i += 1  # Move to the next group
-
-        return merged_groups  # Return the list of merged groups
-
-    def extract_with_bold_annotations(self):
-        """Extract text from a PDF with bold annotations."""
-
-        nested_lines_with_bold = []  # Initialize list to store nested lines with bold annotations
-        current_group = []  # Initialize list to store lines within a group
-        current_line = ""  # Initialize variable to store current line of text
-        last_y = None  # Initialize variable to store last y-coordinate
-        last_char_height = 0  # Initialize variable to store height of last character
-        previous_y = float('inf')  # Initialize variable to store previous y-coordinate
-
-        # Open the PDF file
-        with pdfplumber.open(self.pdf_path) as pdf:
-            # Iterate through each page of the PDF
-            for page in pdf.pages:
-                chars = page.chars  # Get characters on the page
-
-                # Iterate through each character on the page
-                for ch in chars:
-                    # Detect a new column by comparing the y-coordinate
-                    if ch["top"] < previous_y:
-                        if current_line:
-                            current_group.append(current_line.strip())
-                            current_line = ""
-                        if current_group:
-                            nested_lines_with_bold.append(current_group)
-                            current_group = []
-
-                    # Check for a new line by comparing the y-coordinate
-                    if last_y is not None and ch["top"] > (last_y + last_char_height):
-                        if current_line:
-                            current_group.append(current_line.strip())
-                            current_line = ""
-
-                        # Check for a larger than usual gap between lines
-                        if ch["top"] - last_y > observed_pdf_line_width * last_char_height:
-                            if current_group:
-                                nested_lines_with_bold.append(current_group)
-                                current_group = []
-
-                    # Check if text should be prefixed with bold
-                    if "Bold" in ch["fontname"] and not current_line.startswith("Entity:") and \
-                            self.should_add_bold_prefix(ch["text"]):
-
-                        current_line += "Entity:"
-
-                    current_line += ch["text"]  # Append character to current line
-                    last_y = ch["top"]  # Update last y-coordinate
-                    last_char_height = ch["height"]  # Update height of last character
-                    previous_y = last_y  # Store the last y-coordinate for next iteration's comparison
-
-                # Ensure the last line and group are added
-                if current_line:
-                    current_group.append(current_line.strip())
-                if current_group:
-                    nested_lines_with_bold.append(current_group)
-                    current_group = []
-
-        # Merge lines with bold annotations
-        nested_lines_with_bold = self.merge_entity_lines(nested_lines_with_bold)
-
-        # Return nested lines with bold annotations
-        return nested_lines_with_bold
-
-    def split_data(self, lst):
-        """Split a list into sublists whenever a new entity or title is encountered."""
-
-        current = []  # Initialize list to store current sublist
-
-        # Iterate through each item in the list
-        for item in lst:
-            # Check if item starts with 'Entity:' or matches a title pattern
-            if item.startswith('Entity:') or re.match(r'(Mr\.\s*|Mrs\.\s*|Ms\.\s*|Dr\.\s*|Prof\.\s*|M\.\s*|Mme\ \s*|S\.E\.\s*|Sr\.\s*|Sra\.\s*|H\. E\.\s*|H\.E\.\s*)', item):
-                if current:
-                    yield current  # Yield current sublist
-                    current = []  # Reset current sublist
-
-            current.append(item)  # Add item to current sublist
-        if current:
-            yield current  # Yield last sublist if not empty
-
-    def clean_item(self, item):
-        """Clean a text item by removing certain patterns and splitting it into multiple items if needed."""
-
-        output_items = []  # Initialize list to store cleaned text items
-
-        # Check for the presence of 'FCCC' and two occurrences of 'Entity:'
-        if 'FCCC' in item and len(re.findall(r'Entity:', item)) == 2:
-            item = item.split('Entity:', 2)[-1]  # Keep everything after the second 'Entity:'
-        # Check for the presence of two 'Entity:' and absence of 'FCCC'
-        elif len(re.findall(r'Entity:', item)) == 2 and 'FCCC' not in item:
-            item = item.replace('Entity:', '')  # Remove 'Entity:' prefix
-        # Check for one 'Entity:' not at the start
-        elif item.find('Entity:') > 0:
-            prefix, entity_content = item.split('Entity:', 1)
-            if prefix.strip():
-                output_items.append(prefix.strip())  # Add prefix to output
-            item = 'Entity:' + entity_content.strip()  # Add 'Entity:' prefix to the rest of the content
-
-        # The remaining standard cleaning
-        item = re.sub(r'Entity:\s*\d+\s*', '', item)  # Remove 'Entity:' followed by numbers
-        item = re.sub(r'Entity: FCCC/[\w/]+', '', item)  # Remove 'Entity: FCCC/CP/2014/INF.2' pattern
-        output_items.append(item.strip())  # Add cleaned item to output list
-
-        return output_items  # Return cleaned text items
-
-    def clean_list(self, lst):
-        """Clean a list of text items by applying the clean_item function to each item."""
-
-        cleaned = []  # Initialize list to store cleaned text items
-
-        # Iterate through each item in the list
-        for item in lst:
-            cleaned_items = self.clean_item(item)  # Clean the current item
-
-            # Create a nested list if the condition is met
-            if len(cleaned_items) == 2 and 'Entity:' not in cleaned_items[0] and 'Entity:' in cleaned_items[1]:
-                output_list = [[item] for item in cleaned_items]
-                return output_list  # Return nested list if condition is met
-
-            cleaned.extend(cleaned_items)  # Add cleaned items to the list using extend
-
-        return cleaned if cleaned else None  # Return the cleaned list or None if it's empty
-
-class SingleColumnImagePDFTextExtraction():
-    """ Extract data from Single Column image files """
-    def __init__(self, pdf_path):
-        self.pdf_path = pdf_path
-
-    def run(self):
-        extracted_text = self.extract_text_from_pdf()
-
-        # Print or process the extracted text
-        for i, text in enumerate(extracted_text):
-            print(f"Page {i + 1}:\n{text}\n")
-
-    def extract_text_from_pdf(self):
-        # Convert PDF pages to images
-        images = convert_from_path(self.pdf_path)
-
-        extracted_text = []
-
-        for i, img in enumerate(images):
-            # Save the image to a temporary file
-            img_path = f"temp_page_{i}.png"
-            img.save(img_path, 'PNG')
-
-            # Use Tesseract to extract text from the image
-            text = pytesseract.image_to_string(Image.open(img_path))
-
-            # Append the extracted text to the result list
-            extracted_text.append(text)
-
-            # Remove the temporary image file
-            os.remove(img_path)
-
-        return extracted_text
-
-
-class ImageSingleColumnCorrectExtractedContents:
-    """ Correct the extracted data from the single column image files """
-    def __init__(self, input_list, title_match_pattern):
-        self.input_list = input_list
-        self.title_match_pattern = title_match_pattern
-
-    def preprocess_input(self):
-        output_list = []
-        current_title_group = []
-
-        for item in self.input_list:
-            if not item.isupper() or 'suite' in item or 'continued' in item:
-                if self.title_match_pattern.search(item):
-                    if current_title_group:
-                        output_list.append(current_title_group)
-                        current_title_group = [item]
-                    else:
-                        current_title_group.append(item)
-                else:
-                    current_title_group.append(item)
-
-            if item.isupper() or 'suite' in item or 'continued' in item:
-                if current_title_group:
-                    output_list.append(current_title_group)
-                    current_title_group = []
-
-                kk = ['Entity:' + item]
-                output_list.append(kk)
-
-        if current_title_group:
-            output_list.append(current_title_group)
-
-        self.input_list = output_list.copy()
-
-    def filter_strings(self):
-        """
-        Filter out strings from nested lists based on specified criteria,
-        while retaining the nested list structure.
-        """
-        filtered_data = []
-        for item in self.input_list:
-            if isinstance(item, list):  # Check if the item is a list
-                filtered_sublist = [s for s in item if not self.is_excluded(s)]
-                if filtered_sublist:  # Add the sublist only if it's not empty
-                    filtered_data.append(filtered_sublist)
-            elif isinstance(item, str):  # Check if the item is a string
-                if not self.is_excluded(item):
-                    filtered_data.append(item)
-        return filtered_data
-
-    def is_excluded(self, string):
-        """
-        Determine if the string should be excluded based on the specified criteria.
-        """
-        lower_string = string.lower()
-        return (any(c.isdigit() for c in lower_string) or
-                'email' in lower_string or 'T:' in lower_string or
-                'P.O.' in lower_string or 'F:' in lower_string)
-
-    def split_strings(self, filtered_data):
-        output_list = []
-
-        # Iterate through the input lists
-        for inner_list in filtered_data:
-            new_lst = []
-            for each_str in inner_list:
-                # Split the string using commas and strip extra whitespaces
-                split_strings = [part.strip() for part in each_str.split(',')]
-                new_lst.extend(split_strings)
-
-            # Append the split strings as a new list to the output list
-            output_list.append(new_lst)
-
-        return output_list
-
-    def separate_titles(self, filtered_data):
-        op = []
-
-        for inner_list in filtered_data:
-            is_present = False
-            inner_last_split_idx = 0
-
-            if len(inner_list) > 2:
-                for item_idx, item in enumerate(inner_list[1:]):
-
-                    regex = title_match_pattern.search(item)
-                    if regex:
-                        is_present = True
-
-                        kk = item.split(regex.group())
-                        first_person_detail = inner_list[inner_last_split_idx:item_idx + 1]
-                        first_person_detail.append(kk[0])
-
-                        rem_person_detail = inner_list[item_idx + 2:]
-                        # rem_person_detail[0] = str(regex.group()) + rem_person_detail[0]
-                        rem_person_detail.insert(0, kk[1])
-                        rem_person_detail[0] = str(regex.group()) + rem_person_detail[0]
-
-                        op.append(first_person_detail)
-                        op.append(rem_person_detail)
-                        inner_last_split_idx = item_idx + 1
-
-                    else:
-                        # If no title is found, add to the current list
-                        # new_data[-1].append(item)
-                        pass
-
-            if not is_present:
-                op.append(inner_list)
-
-        for k in op:
-            if 'continued' in k[-1].lower():
-                k.pop(-1)
-
-        for k in range(len(op)-1):
-            if 'Entity:' + str(op[k][-1]) == op[k+1][0]:
-                op[k].pop(-1)
-
-        return op
-
-
-    def run(self):
-        self.preprocess_input()
-        filtered_data = self.filter_strings()
-        separated_titles = self.separate_titles(filtered_data)
-
-        non_empty_person_data = []
-        final_person_data = []
-
-        for person_data in separated_titles:
-            if person_data and person_data[0]:
-                non_empty_person_data.append(person_data)
-
-        for each_person in non_empty_person_data:
-            each_person = [person_detail for person_detail in each_person if person_detail]
-            final_person_data.append(each_person)
-
-        person_details = []
-
-        # some persons data is splitted, so correcting it.
-        for k in final_person_data:
-            if not 'Entity' in k[0] and not 'Group' in k[0]:
-                jk = k[0]
-                jk = jk.split()[::-1]
-                try:
-                    surname_idx = [idx for idx in range(len(jk)) if jk[idx].isupper()]
-
-                    if surname_idx:
-                        surname_idx = surname_idx[0]
-                    else:
-                        continue
-
-                except Exception as e:
-                    import ipdb;ipdb.set_trace()
-
-                k.pop(0)
-                k.insert(0, ' '.join(jk[surname_idx:][::-1]))
-                k.insert(1, ' '.join(jk[:surname_idx][::-1]))
-
-            person_details.append(k)
-
-        for each_person in person_details:
-            each_person = [person_detail for person_detail in each_person if person_detail]
-            print(each_person)
-
+            for page in pdf.pages[:2]:  # first up to 2 pages
+                words = page.extract_words() or []
+                if not words:
+                    continue
+                left = sum(1 for w in words if w.get("x0", 0.0) < x0_thresh)
+                right = sum(1 for w in words if w.get("x0", 0.0) >= x0_thresh)
+                total = left + right
+                if total == 0:
+                    continue
+                # if both sides carry at least 25% each, assume 2 columns
+                if left / total >= 0.25 and right / total >= 0.25:
+                    return "two"
+            return "one"
+    except Exception:
+        # If anything fails, default to one
+        return "one"
+
+
+def extract_cites(
+    pdf_path: str,
+    layout: str = "auto",         # "auto" | "one" | "two"
+    x0_thresh: float = 260.0,
+    force_ocr: bool = False,
+    tesseract_cmd: Optional[str] = None,
+    poppler_path: Optional[str] = None,
+    ocr_dpi: int = 300
+) -> List[Record]:
+
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    if force_ocr:
+        return extract_with_ocr(pdf_path, x0_thresh=x0_thresh, dpi=ocr_dpi, poppler_path=poppler_path)
+
+    # Try using text-based extraction
+    mode = detect_layout_quick(pdf_path, x0_thresh=x0_thresh) if layout == "auto" else layout
+    if mode == "two":
+        return extract_twocol_textpdf(pdf_path, x0_thresh=x0_thresh)
+    else:
+        return extract_singlecol_textpdf(pdf_path)
+
+
+def to_dataframe(records: List[Record]) -> pd.DataFrame:
+    """Convert records to a pandas DataFrame with stable column order."""
+    return pd.DataFrame(
+        [r.__dict__ for r in records],
+        columns=["Delegation", "Honorific", "Person_Name", "Affiliation"]
+    )
+
+
+def write_output(df: pd.DataFrame, out_path: str) -> None:
+    """Write CSV/XLSX depending on file extension."""
+    ext = os.path.splitext(out_path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df.to_excel(out_path, index=False)
+    else:
+        df.to_csv(out_path, index=False, encoding="utf-8-sig")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Extract CITES COP Participant lists (PDF) → CSV/XLSX",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    p.add_argument("pdf", help="Path to input PDF")
+    p.add_argument("-o", "--out", default="cites_participants.csv", help="Output file (.csv or .xlsx)")
+    p.add_argument("--layout", choices=["auto", "one", "two"], default="auto", help="Force layout or auto-detect")
+    p.add_argument("--x-threshold", type=float, default=260.0, help="Column split threshold (x0)")
+    p.add_argument("--force-ocr", action="store_true", help="Force OCR pipeline (image PDFs)")
+    p.add_argument("--tesseract-cmd", default=None, help="Path to Tesseract executable")
+    p.add_argument("--poppler-path", default=None, help="Path to Poppler binaries (Windows)")
+    p.add_argument("--ocr-dpi", type=int, default=300, help="DPI for OCR rasterization")
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+
+    recs = extract_cites(
+        pdf_path=args.pdf,
+        layout=args.layout,
+        x0_thresh=args.x_threshold,
+        force_ocr=args.force_ocr,
+        tesseract_cmd=args.tesseract_cmd,
+        poppler_path=args.poppler_path,
+        ocr_dpi=args.ocr_dpi
+    )
+
+    df = to_dataframe(recs)
+    write_output(df, args.out)
+    print(f"Wrote {len(df)} rows to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
 
 # ***************************************
 # Uncomment the below to start Execution:
-
-
-# Uncomment the below method for Extracting data from "Single Column" text PDF file.
-# ExtractOneColumnPdfData(pdf_path).run()
-
-# Image PDF files converted to Text PDF files using Online "I love PDF" website
-# ExtractTwoColumnsPDF(pdf_path, 275).run()
-
-# Uncomment the below method for Extracting data from "Double or Triple" Column text PDF file.
-
-# This is the gap from each person to another person, for some pdf, it is 2, for some it is 1.38, ....
-# if this is not set properly, then the person details will become messy.
-# observed_pdf_line_width = 1.2
-# ExtractThreeColumnsPdfData(pdf_path, observed_pdf_line_width).run()
-
-# 1. After running this, we have to add the Group Names from the Participants column of the pdf.
-# 2. we have to convert it to a list of lists.
-# --------------------------------------------------
-# Extract from Single Column Image PDF
-# SingleColumnImagePDFTextExtraction(pdf_path).run()
-
-
-# ** manually take the output of this function(which is printed in the shell) and verify it for Entity names, as if they are correct or not and then manually correct
-# something which is not correct and not handled in this below functions. Once it is ready, keep the corrected data in this list, in the below format:
-
-
-# This is the Example format:
-# [['Raju', 'Engineer', 'Customer Acquisition Department', 'Sugar Cosmetics'], ['Kiran', 'Professor', 'Data Science Department', 'University of Delaware']]
-
-# manually_corrected_ip_data = []
 #
-# ImageSingleColumnCorrectExtractedContents(manually_corrected_ip_data, title_match_pattern).run()
+# Example 1: Extracting data from a "Single Column" text PDF file.
+# records = extract_cites(
+#     pdf_path=r"C:\path\to\CITES_COP_Participants.pdf",
+#     layout="one",               # or "auto"
+#     x0_thresh=260.0,
+#     force_ocr=False,
+#     tesseract_cmd=r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # if needed
+#     poppler_path=None
+# )
+# df = to_dataframe(records)
+# write_output(df, r"C:\path\to\output.csv")
+#
+# Example 2: Two-column text PDF.
+# records = extract_cites(
+#     pdf_path=r"C:\path\to\CITES_COP_Participants_2.pdf",
+#     layout="two",               # or "auto" if you want detection
+#     x0_thresh=260.0,
+#     force_ocr=False
+# )
+# df = to_dataframe(records)
+# write_output(df, r"C:\path\to\output.xlsx")
+#
+# Example 3: Image PDF (OCR). Works for single or two columns via TSV geometry.
+# records = extract_cites(
+#     pdf_path=r"C:\path\to\CITES_COP_Participants_cop1.pdf",
+#     layout="auto",              # layout is ignored for OCR; geometry is from TSV
+#     x0_thresh=260.0,
+#     force_ocr=True,
+#     tesseract_cmd=r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+#     poppler_path=r"C:\path\to\poppler\bin",    # needed on Windows for pdf2image
+#     ocr_dpi=300
+# )
+# df = to_dataframe(records)
+# write_output(df, r"C:\path\to\output.csv")
