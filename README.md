@@ -38,10 +38,6 @@ To set up the project environment, follow these steps:
         - Files:
            - extract_pdf_data.py: Orchestrates PDF parsing; routes pages to the appropriate extractor (text vs. scan; single/dual column), applies page-level cleanup, and writes the initial rows.
 
-           - two_columns_file_extract.py – Heuristics for 2-column rosters: finds delegation headers (underlined/bold ALL-CAPS, often with multilingual slashes), detects person starts via honorific regexes or ALL-CAPS surnames / dotted initials (e.g., J.H.M.), uses @ as a splitter in dense blocks, and assigns the remainder to Affiliation until the next person/delegation.
-
-          - single_column_bold_extract.py – Handles single-column layouts (including OCR output): merges bold/ALL-CAPS delegation lines, applies the same person-start rules, filters contact lines (T:/F:/E:/email), and emits normalized rows.
-
           - processing_data.py – Post-extraction cleaning and harmonization: fixes wrap/merge artifacts, drops pagination noise, normalizes whitespace, resolves multilingual Delegation strings (Belgium/Bélgica/Belgique → Belgium), and de-duplicates.
 
           - standardize_person_names.py – Normalizes names to First Last (LAST, First and LAST First … → First Last; supports multi-token surnames).
