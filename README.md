@@ -67,6 +67,7 @@ To set up the project environment, follow these steps:
    - Benjamin E. Bagozzi (Corresponding author: bagozzib@udel.edu)
    - Daria Blinova
    - Rakesh Emuru
+   - Gayathri Emuru
      
 ## License
 
