@@ -10,8 +10,8 @@
 
 
 ## Description:
-The code in this repository extracts, classifies, and formats attendee records from the Convention on International Trade in Endangered Species of Wild Fauna and Flora (CITES) Conference of the Parties (CoP) rosters (CoP1–CoP19). Source documents are mixed text/scan PDFs with multi-column layouts and multilingual headings; the pipeline performs layout-aware parsing/OCR, detects delegation headers, identifies person starts, and normalizes names. The primary attendee output consists of Delegation, Honorific, Person Name, and Affiliation.
-In addition, the repo includes routines to standardize person names (e.g., LAST, First → First Last), harmonize delegation names, flag multilingual delegation strings, add ISO/COW country codes, derive CoP year and host city, geolocate affiliations and CoP cities (lat/long), compute attendee–CoP distances, flag likely country-centroid geocodes, and construct a female indicator by combining honorifics with a first-name–based gender guess.
+The code in this repository extracts, classifies, and formats attendee records from the Convention on International Trade in Endangered Species of Wild Fauna and Flora (CITES) Conference of the Parties (CoP) rosters (CoP1–CoP20). Source documents are mixed text/scan PDFs with multi-column layouts and multilingual headings; the pipeline performs layout-aware parsing/OCR, detects delegation headers, identifies person starts, and normalizes names. The primary attendee output consists of Delegation, Honorific, Person Name, and Affiliation.
+In addition, the repo includes routines to standardize person names (e.g., LAST, First → First Last), harmonize delegation names, flag multilingual delegation strings, add ISO/COW country codes, derive CoP year and host city, geolocate affiliations and CoP cities (lat/long), compute attendee–CoP distances, flag GeoPrecision status, and construct a female indicator by combining honorifics with a first-name–based gender guess.
 
 ## Installation:
 To set up the project environment, follow these steps:
@@ -39,16 +39,22 @@ To set up the project environment, follow these steps:
            - extract_pdf_data.py: Orchestrates PDF parsing; routes pages to the appropriate extractor (text vs. scan; single/dual column), applies page-level cleanup, and writes the initial rows.
 
           - processing_data.py – Post-extraction cleaning and harmonization: fixes wrap/merge artifacts, drops pagination noise, normalizes whitespace, resolves multilingual Delegation strings (Belgium/Bélgica/Belgique → Belgium), and de-duplicates.
-
+         
           - standardize_person_names.py – Normalizes names to First Last (LAST, First and LAST First … → First Last; supports multi-token surnames).
+         
+          - hashing_person_names.py – Creates a stable anonymized attendee identifier ID by applying a salted cryptographic hash to each attendee’s standardized full name (from standardize_person_names.py), enabling linking/dedup without exposing identities.
 
           - gender_guess.py – Adds a GenderGuess column (and a Female indicator) using first-name inference plus honorifics (Namsor API workflow).
 
           - get_lat_lang.py – Geocodes affiliations and CoP host cities to latitude/longitude (Nominatim/ArcGIS with caching/backoffs).
 
-          - city_centroid.py – Flags likely country-centroid geocodes (is_country_centroid): reverse-geocodes the point to a country, compares to country reference points from two sources, and applies distance thresholds that scale with country size.
-
-          - haversine_distance.py – Computes great-circle distance (km) between attendee coordinates and the corresponding CoP city coordinates.     
+          - haversine_distance.py – Computes great-circle distance (km) between attendee coordinates and the corresponding CoP city coordinates.
+         
+          - geoprivacy.py – Privacy-safe geolocation: reverse-geocodes each lat/long to detect overly precise address fields (street/house number/postcode/sub-city). If too precise, it re-geocodes only a coarse string (City–State/Province–Country → State/Province–Country → Country), rounds coordinates (City: 2 decimals; State/Country: 1), and writes published coordinates; otherwise sets GeoPrecision = NA when a safe point cannot be obtained.
+         
+          - standardize_gender_and_gender_technical_validation.py – Standardizes honorifics, derives a gold gender label from honorific rules, converts Female(Guess) into a predicted gender label, and computes validation metrics (confusion matrix + precision/recall/F1/accuracy) on rows where gold gender is available.
+         
+          - standardize_affiliation.py – Cleans the affiliation free-text field by removing contact identifiers (e.g., emails/phone numbers) and normalizing formatting; assigns AffiliationStatus to record whether the affiliation was kept or generalized for privacy (KeptOriginal, City, State, Country).
 
    - **r_code**: This directory contains R scripts designed for functions such as data cleaning and validation.
        - Files:
@@ -57,6 +63,7 @@ To set up the project environment, follow these steps:
           - CITES Extracted Data V2.xlsx – Intermediate dataset emitted by the Python extractor; input to FinalDataCleaning.R.
           - spatialvalidation.csv – 1,000-row sample for manual lat/long checks.
           - spatialvalidation DB.csv – the manually coded results.
+          - add_source_url.R – Adds the original CITES PDF source URL per CoP (and parties/observers status when available) by deriving cop_num
 
      
    - **requirements.txt**: This file enumerates the Python dependencies necessary for the project.
