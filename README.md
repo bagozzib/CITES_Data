@@ -58,8 +58,8 @@ To set up the project environment, follow these steps:
 
    - **r_code**: This directory contains R scripts designed for functions such as data cleaning and validation.
        - Files:
-          - FinalDataCleaning.R – Reads CITES Extracted Data V2.xlsx, normalizes honorifics, builds Female/Male from honorifics and gender-guess scores, standardizes Status and creates Party/Observer dummies, harmonizes Delegation names (multi-language variants, historical names, typos), fixes known anomalies, adds COW country codes, and writes the final analysis file cites.cops.csv. Prints basic validation stats.
-          - Descriptives.R – Reads cites.cops.csv, reports column-wise missingness, and generates: MF.pdf (Female vs. Male over time), PO.pdf (Party vs. Observer over time), ShadedMap.pdf (choropleth of attendee counts), worldpoints.pdf (all geocoded points), and delegation_wordcloud.png (observer delegations).
+          - FinalDataCleaning.R – Reads CITES Extracted Data V2.xlsx, standardizes Status and creates Party/Observer dummies, harmonizes Delegation names (multi-language variants, historical names, typos), fixes known anomalies, adds COW country codes, and writes the final analysis file cites.cops.csv. 
+          - Descriptives.R – Reads cites.cops.csv, reports column-wise missingness, and generates a series of descriptive plots: MF.pdf (Female vs. Male over time), PO.pdf (Party vs. Observer over time), ShadedMap.pdf (choropleth of attendee counts), worldpoints.pdf (all geocoded points), and delegation_wordcloud.png (observer delegations).
           - CITES Extracted Data V2.xlsx – Intermediate dataset emitted by the Python extractor; input to FinalDataCleaning.R.
           - spatialvalidation.csv – 1,000-row sample for manual lat/long checks.
           - spatialvalidation DB.csv – the manually coded results.
