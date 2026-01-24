@@ -63,7 +63,7 @@ To set up the project environment, follow these steps:
           - CITES Extracted Data V2.xlsx – Intermediate dataset emitted by the Python extractor; input to FinalDataCleaning.R.
           - spatialvalidation.csv – 1,000-row sample for manual lat/long checks.
           - spatialvalidation DB.csv – the manually coded results.
-          - add_source_url.R – Adds the original CITES PDF source URL per CoP (and parties/observers status when available) by deriving cop_num
+          - add_source_url.R – Adds the original CITES PDF source URL per CoP (and parties/observers status when available).
 
      
    - **requirements.txt**: This file enumerates the Python dependencies necessary for the project.
